@@ -24,9 +24,9 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from .models import DeviceInfo, GrantTo, LinkedDevice
+from .models import DeviceInfo, GrantTo, LinkedDevice, State
 from .service import OfferView, PairingError, PairingService
 
 STATUS = {
@@ -51,6 +51,54 @@ class CreateOfferIn(BaseModel):
 class ClaimIn(BaseModel):
     secret: str = Field(min_length=10, max_length=200)
     device_label: str = Field("", max_length=100)
+
+
+# Responses. Declared so the OpenAPI spec describes exactly what clients receive, and
+# apps can generate client types from it. Times are ISO 8601 strings.
+
+
+class OfferCreated(BaseModel):
+    offer_id: str
+    secret: str = Field(description="goes in the QR code, in the URL fragment")
+    shower_key: str = Field(description="this device's private key: X-Pairkit-Key / ?key=")
+    expires_at: str
+    qr_url: str | None = Field(None, description="ready-to-encode scan link, when the router has a scan_url")
+
+
+class Claimed(BaseModel):
+    offer_id: str
+    claimer_key: str = Field(description="the scanning device's private key: X-Pairkit-Key / ?key=")
+    grant_to: GrantTo
+    scopes: list[str]
+    shower: str = Field(description="how the device showing the QR describes itself")
+    expires_at: str
+
+
+class OfferStatus(BaseModel):
+    offer_id: str
+    state: State
+    grant_to: GrantTo
+    scopes: list[str]
+    expires_at: str
+    shower: str
+    scanner: str | None
+
+
+class Collected(BaseModel):
+    """The grant from the app's issue_grant hook, plus whatever it put in Grant.data."""
+
+    model_config = ConfigDict(extra="allow")
+    token: str
+    expires_at: str | None
+
+
+class LinkedDeviceOut(BaseModel):
+    id: str
+    device: str
+    scopes: list[str]
+    linked_at: str
+    via: GrantTo
+    active: bool
 
 
 def _device(request: Request, label: str) -> DeviceInfo:
@@ -108,7 +156,7 @@ def pairing_router(
     User = Annotated[str, Depends(required)]
     Key = Annotated[str, Header(alias="X-Pairkit-Key")]
 
-    @router.post("/offers", status_code=201)
+    @router.post("/offers", status_code=201, response_model=OfferCreated, response_model_exclude_none=True)
     async def create_offer(body: CreateOfferIn, request: Request, user: OptionalUser):
         try:
             o = await service.create_offer(body.grant_to, body.scopes, _device(request, body.device_label), user)
@@ -120,7 +168,7 @@ def pairing_router(
             out["qr_url"] = o.qr_payload(scan_url)
         return out
 
-    @router.post("/claim")
+    @router.post("/claim", response_model=Claimed)
     async def claim(body: ClaimIn, request: Request, user: OptionalUser):
         device = _device(request, body.device_label)
         try:
@@ -130,14 +178,16 @@ def pairing_router(
         return {"offer_id": c.offer_id, "claimer_key": c.claimer_key, "grant_to": c.grant_to.value,
                 "scopes": list(c.scopes), "shower": c.shower.describe(), "expires_at": c.expires_at.isoformat()}
 
-    @router.get("/offers/{offer_id}")
+    @router.get("/offers/{offer_id}", response_model=OfferStatus)
     async def status(offer_id: str, key: Key):
         try:
             return _view(await service.status(offer_id, key))
         except PairingError as e:
             raise _fail(e) from None
 
-    @router.get("/offers/{offer_id}/events")
+    @router.get("/offers/{offer_id}/events", response_class=StreamingResponse,
+                responses={200: {"content": {"text/event-stream": {}},
+                                 "description": "Server-sent events: state, claimed, approved, denied, collected, expired"}})
     async def events(offer_id: str, key: Annotated[str, Query()]):
         try:
             await service.status(offer_id, key)  # fail fast with a proper status code
@@ -151,21 +201,21 @@ def pairing_router(
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
-    @router.post("/offers/{offer_id}/approve")
+    @router.post("/offers/{offer_id}/approve", response_model=OfferStatus)
     async def approve(offer_id: str, user: User):
         try:
             return _view(await service.approve(offer_id, user))
         except PairingError as e:
             raise _fail(e) from None
 
-    @router.post("/offers/{offer_id}/deny")
+    @router.post("/offers/{offer_id}/deny", response_model=OfferStatus)
     async def deny(offer_id: str, user: User):
         try:
             return _view(await service.deny(offer_id, user))
         except PairingError as e:
             raise _fail(e) from None
 
-    @router.post("/offers/{offer_id}/collect")
+    @router.post("/offers/{offer_id}/collect", response_model=Collected)
     async def collect(offer_id: str, key: Key):
         try:
             g = await service.collect(offer_id, key)
@@ -173,11 +223,11 @@ def pairing_router(
             raise _fail(e) from None
         return {"token": g.token, "expires_at": g.expires_at.isoformat() if g.expires_at else None, **g.data}
 
-    @router.get("/devices")
+    @router.get("/devices", response_model=list[LinkedDeviceOut])
     async def devices(user: User):
         return [_linked(d) for d in await service.list_devices(user)]
 
-    @router.delete("/devices/{device_id}")
+    @router.delete("/devices/{device_id}", response_model=LinkedDeviceOut)
     async def unlink(device_id: str, user: User):
         try:
             return _linked(await service.revoke_device(device_id, user))

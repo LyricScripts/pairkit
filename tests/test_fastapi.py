@@ -74,3 +74,25 @@ def test_error_codes(client):
     assert second.status_code == 409 and second.json()["detail"]["code"] == "already_used"
     assert client.post(f"/pair/offers/{offer['offer_id']}/approve").status_code == 401
     assert client.get(f"/pair/offers/{offer['offer_id']}", headers={"X-Pairkit-Key": "nope"}).status_code == 404
+
+
+def test_openapi_describes_every_response(client):
+    """Apps generate client types from the OpenAPI spec, so every JSON response needs a schema."""
+    spec = client.get("/openapi.json").json()
+    for path, methods in spec["paths"].items():
+        for method, op in methods.items():
+            content = op["responses"][next(c for c in op["responses"] if c.startswith("2"))]["content"]
+            if path.endswith("/events"):
+                assert "text/event-stream" in content
+            else:
+                assert content["application/json"]["schema"], f"{method.upper()} {path}"
+    created = spec["components"]["schemas"]["OfferCreated"]
+    assert {"offer_id", "secret", "shower_key", "expires_at"} <= set(created["required"])
+
+
+def test_qr_url_only_when_the_router_has_a_scan_url():
+    app = FastAPI()
+    app.include_router(pairing_router(PairingService(PairingHooks(issue)), current_user))
+    offer = TestClient(app).post("/pair/offers", json={"grant_to": "scanner", "scopes": ["upload"]},
+                                 headers=ALMAS).json()
+    assert "qr_url" not in offer and offer["secret"]
