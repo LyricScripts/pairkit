@@ -60,6 +60,8 @@ app.include_router(pairing_router(service, current_user, scan_url="https://app.e
 | `POST /pair/offers/{id}/collect` | Receiving device: picks up its token once |
 | `GET /pair/devices` · `DELETE /pair/devices/{id}` | User: list and unlink devices |
 
+Every endpoint declares its response model, so your app's OpenAPI spec describes them exactly and client types can be generated from it.
+
 The core (`PairingService`) has no web framework dependency; other adapters can wrap it the same way.
 
 ## Try the demo
@@ -77,7 +79,7 @@ Open the printed address on your PC, scan the QR with your phone's camera, click
 
 ```bash
 uv sync
-uv run pytest     # flows, permissions, replay, races, expiry, live events, HTTP API
+uv run pytest     # flows, permissions, replay, races, expiry, live events, HTTP API, OpenAPI contract
 uv run ruff check .
 ```
 
@@ -87,6 +89,6 @@ uv run ruff check .
 
 ## Roadmap
 
-- Redis store and event bus
+- A Postgres store and event bus (LISTEN/NOTIFY), for apps that already run Postgres and need several server processes
 - `@pairkit/client` JavaScript package: QR display, waiting state, phone-side helpers
 - Django adapter
